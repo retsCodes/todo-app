@@ -4,52 +4,78 @@ const mongoose = require('mongoose');
 const promClient = require('prom-client');
 const app = express();
 
-// Use PORT from environment variable or default to 3000
 const PORT = process.env.PORT || 3000;
+const MONGODB_URI = process.env.MONGODB_URI;
+
+// Connect to MongoDB
+mongoose.connect(MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+}).then(() => {
+    console.log('Connected to MongoDB Atlas');
+}).catch(err => {
+    console.error('MongoDB connection error:', err);
+});
+
+// Todo schema
+const TodoSchema = new mongoose.Schema({
+    title: String,
+    completed: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+});
+const Todo = mongoose.model('Todo', TodoSchema);
 
 app.use(express.json());
 app.use(express.static('.'));
 
-// Initialize Prometheus metrics
+// Prometheus metrics
 const register = new promClient.Registry();
 promClient.collectDefaultMetrics({ register });
 
-// Simple metrics endpoint
+const todoCounter = new promClient.Counter({
+    name: 'todo_created_total',
+    help: 'Total number of todos created',
+    registers: [register]
+});
+
+const activeTodos = new promClient.Gauge({
+    name: 'active_todos_total',
+    help: 'Current number of active todos',
+    registers: [register]
+});
+
+// Metrics endpoint
 app.get('/metrics', async (req, res) => {
+    const count = await Todo.countDocuments();
+    activeTodos.set(count);
     res.set('Content-Type', register.contentType);
     res.end(await register.metrics());
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.status(200).send('OK');
+// API endpoints
+app.get('/api/todos', async (req, res) => {
+    const todos = await Todo.find().sort('-createdAt');
+    res.json(todos);
 });
 
-// Root endpoint
+app.post('/api/todos', async (req, res) => {
+    const todo = new Todo({ title: req.body.title });
+    await todo.save();
+    todoCounter.inc();
+    res.json(todo);
+});
+
+app.delete('/api/todos/:id', async (req, res) => {
+    await Todo.findByIdAndDelete(req.params.id);
+    res.json({ message: 'deleted' });
+});
+
+// Serve frontend
 app.get('/', (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head><title>Todo App</title></head>
-        <body>
-            <h1>Todo App is Running!</h1>
-            <p>Metrics available at <a href="/metrics">/metrics</a></p>
-        </body>
-        </html>
-    `);
+    res.sendFile(__dirname + '/index.html');
 });
 
-// Start server
-const server = app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Todo app running on http://0.0.0.0:${PORT}`);
     console.log(`Metrics available at http://0.0.0.0:${PORT}/metrics`);
-});
-
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM received, closing server...');
-    server.close(() => {
-        console.log('Server closed');
-        process.exit(0);
-    });
 });
