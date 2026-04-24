@@ -1,14 +1,13 @@
 {
   "name": "todo-app",
   "version": "1.0.0",
-  "description": "Todo app with MongoDB and Prometheus metrics",
+  "description": "Todo app with Prometheus metrics",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "mongoose": "^8.0.0",
     "prom-client": "^15.1.0",
     "dotenv": "^16.3.1"
   }
