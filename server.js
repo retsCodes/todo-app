@@ -1,4 +1,3 @@
-require('dotenv').config();
 const express = require('express');
 const promClient = require('prom-client');
 const app = express();
@@ -36,7 +35,7 @@ let todoId = 1;
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // Metrics endpoint
@@ -81,7 +80,7 @@ app.delete('/api/todos/:id', (req, res) => {
     res.json({ message: 'deleted' });
 });
 
-// Serve HTML - This must be the LAST route
+// Serve HTML
 const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -260,5 +259,11 @@ app.get('/', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Todo app running on http://0.0.0.0:${PORT}`);
     console.log(`📊 Metrics available at http://0.0.0.0:${PORT}/metrics`);
-    console.log(`🌍 Live at: https://todo-app-ggty.onrender.com`);
+    console.log(`🏥 Health check at http://0.0.0.0:${PORT}/health`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, closing server...');
+    process.exit(0);
 });
