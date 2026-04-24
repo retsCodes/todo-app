@@ -1,24 +1,11 @@
 require('dotenv').config();
 const express = require('express');
-const mongoose = require('mongoose');
 const promClient = require('prom-client');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const GRAFANA_USERNAME = process.env.GRAFANA_USERNAME;
-const GRAFANA_API_TOKEN = process.env.GRAFANA_API_TOKEN;
-
-console.log('Starting Todo App...');
-console.log(`Grafana Username: ${GRAFANA_USERNAME ? 'Set ✓' : 'Missing ✗'}`);
-console.log(`Grafana Token: ${GRAFANA_API_TOKEN ? 'Set ✓' : 'Missing ✗'}`);
-
-// TODO: Add MongoDB connection when ready
-// For now, we'll use in-memory storage
-let todos = [];
-let todoId = 1;
 
 app.use(express.json());
-app.use(express.static('.'));
 
 // Initialize Prometheus metrics
 const register = new promClient.Registry();
@@ -41,6 +28,15 @@ const activeTodosGauge = new promClient.Gauge({
     name: 'active_todos_total',
     help: 'Current number of active todos',
     registers: [register]
+});
+
+// In-memory storage
+let todos = [];
+let todoId = 1;
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
 });
 
 // Metrics endpoint
@@ -85,10 +81,8 @@ app.delete('/api/todos/:id', (req, res) => {
     res.json({ message: 'deleted' });
 });
 
-// Serve frontend
-app.get('/', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
+// Serve HTML - This must be the LAST route
+const html = `<!DOCTYPE html>
 <html>
 <head>
     <title>Todo App</title>
@@ -201,19 +195,18 @@ app.get('/', (req, res) => {
             if (todos.length === 0) {
                 container.innerHTML = '<div class="empty-state">✨ No tasks yet. Add one above!</div>';
             } else {
-                container.innerHTML = todos.map(todo => \`
-                    <div class="todo-item \${todo.completed ? 'completed' : ''}">
-                        <input type="checkbox" class="todo-checkbox" 
-                            \${todo.completed ? 'checked' : ''}
-                            onchange="toggleTodo(\${todo.id}, this.checked)">
-                        <span class="todo-title">\${escapeHtml(todo.title)}</span>
-                        <button class="delete-btn" onclick="deleteTodo(\${todo.id})">Delete</button>
-                    </div>
-                \`).join('');
+                container.innerHTML = todos.map(todo => {
+                    return '<div class="todo-item ' + (todo.completed ? 'completed' : '') + '">' +
+                        '<input type="checkbox" class="todo-checkbox" ' + (todo.completed ? 'checked' : '') + 
+                        ' onchange="toggleTodo(' + todo.id + ', this.checked)">' +
+                        '<span class="todo-title">' + escapeHtml(todo.title) + '</span>' +
+                        '<button class="delete-btn" onclick="deleteTodo(' + todo.id + ')">Delete</button>' +
+                        '</div>';
+                }).join('');
             }
             const total = todos.length;
             const completed = todos.filter(t => t.completed).length;
-            document.getElementById('stats').innerHTML = \`📊 \${total} total | ✅ \${completed} completed\`;
+            document.getElementById('stats').innerHTML = '📊 ' + total + ' total | ✅ ' + completed + ' completed';
         } catch (error) {
             console.error('Error:', error);
         }
@@ -239,7 +232,7 @@ app.get('/', (req, res) => {
     }
     
     async function toggleTodo(id, completed) {
-        await fetch(\`/api/todos/\${id}\`, {
+        await fetch('/api/todos/' + id, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ completed })
@@ -249,7 +242,7 @@ app.get('/', (req, res) => {
     
     async function deleteTodo(id) {
         if (confirm('Delete this task?')) {
-            await fetch(\`/api/todos/\${id}\`, { method: 'DELETE' });
+            await fetch('/api/todos/' + id, { method: 'DELETE' });
             loadTodos();
         }
     }
@@ -258,8 +251,10 @@ app.get('/', (req, res) => {
     setInterval(loadTodos, 5000);
 </script>
 </body>
-</html>
-    `);
+</html>`;
+
+app.get('/', (req, res) => {
+    res.send(html);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
