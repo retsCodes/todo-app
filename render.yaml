@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: todo-app-cloud
+    runtime: node
+    repo: https://github.com/retsCodes/todo-app
+    branch: main
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: IS_CLOUD
+        value: true
+      - key: LOCAL_API
+        value: http://your-home-ip:3000  # Your public IP or domain
+      - key: PORT
+        value: 3000
+    healthCheckPath: /health
