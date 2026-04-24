@@ -10,7 +10,7 @@ services:
       - key: IS_CLOUD
         value: true
       - key: LOCAL_API
-        value: http://your-home-ip:3000  # Your public IP or domain
+        value: http://YOUR_PUBLIC_IP:3000  # Replace with your public IP
       - key: PORT
         value: 3000
     healthCheckPath: /health

@@ -3,7 +3,7 @@ const promClient = require('prom-client');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const IS_CLOUD = process.env.IS_CLOUD === 'true' || false;
+const IS_CLOUD = process.env.IS_CLOUD === 'true';
 const LOCAL_API = process.env.LOCAL_API || 'http://host.docker.internal:3000';
 
 app.use(express.json());
@@ -37,34 +37,33 @@ const activeTodosGauge = new promClient.Gauge({
     registers: [register]
 });
 
-const syncStatusGauge = new promClient.Gauge({
-    name: 'sync_status',
-    help: 'Sync status between local and cloud (1=synced, 0=unsynced)',
+const cloudSyncStatus = new promClient.Gauge({
+    name: 'cloud_sync_status',
+    help: 'Cloud sync status (1=synced, 0=unsynced)',
     registers: [register]
 });
 
 const localHealthGauge = new promClient.Gauge({
     name: 'local_health_status',
-    help: 'Local app health status (1=up, 0=down)',
+    help: 'Local app health (1=up, 0=down)',
     registers: [register]
 });
 
-// In-memory storage
+// In-memory storage (only used if cloud and local is down)
 let todos = [];
 let todoId = 1;
-let cloudTodoCount = 0;
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
-    res.status(200).json({ 
+    res.json({ 
         status: 'ok', 
-        role: IS_CLOUD ? 'cloud' : 'local',
-        timestamp: new Date().toISOString(),
-        todoCount: todos.length
+        role: IS_CLOUD ? 'cloud-replica' : 'local-primary',
+        todoCount: todos.length,
+        timestamp: new Date().toISOString()
     });
 });
 
-// Check local health (for cloud instance)
+// Check local health (for cloud)
 app.get('/check-local', async (req, res) => {
     try {
         const response = await fetch(`${LOCAL_API}/health`);
@@ -77,44 +76,54 @@ app.get('/check-local', async (req, res) => {
     }
 });
 
-// Sync endpoint - cloud calls this to get data from local
+// Get data from local (for cloud sync)
 app.get('/sync-from-local', async (req, res) => {
     if (IS_CLOUD) {
         try {
             const response = await fetch(`${LOCAL_API}/api/todos`);
             const localTodos = await response.json();
-            cloudTodoCount = localTodos.length;
-            res.json({ synced: true, count: localTodos.length, todos: localTodos });
+            todos = localTodos; // Cloud mirrors local
+            cloudSyncStatus.set(1);
+            res.json({ synced: true, count: localTodos.length });
         } catch (error) {
+            cloudSyncStatus.set(0);
             res.json({ synced: false, error: error.message });
         }
     } else {
-        res.json({ role: 'local', todos: todos });
+        res.json({ role: 'local-primary', todos: todos });
     }
 });
 
-// Metrics endpoint - enhanced
-app.get('/metrics', async (req, res) => {
-    // Update gauges
-    activeTodosGauge.set(todos.length);
-    
-    // Check sync status
+// Push cloud data to local (when cloud gets data and local is up)
+app.post('/push-to-local', async (req, res) => {
     if (IS_CLOUD) {
+        const { action, data } = req.body;
         try {
-            const response = await fetch(`${LOCAL_API}/api/todos`);
-            const localTodos = await response.json();
-            if (localTodos.length === todos.length) {
-                syncStatusGauge.set(1);
-            } else {
-                syncStatusGauge.set(0);
+            if (action === 'create') {
+                await fetch(`${LOCAL_API}/api/todos`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: data.title })
+                });
+            } else if (action === 'update') {
+                await fetch(`${LOCAL_API}/api/todos/${data.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ completed: data.completed })
+                });
+            } else if (action === 'delete') {
+                await fetch(`${LOCAL_API}/api/todos/${data.id}`, { method: 'DELETE' });
             }
-        } catch {
-            syncStatusGauge.set(0);
+            res.json({ pushed: true });
+        } catch (error) {
+            res.json({ pushed: false, error: error.message });
         }
-    } else {
-        syncStatusGauge.set(1); // Local is always synced with itself
     }
-    
+});
+
+// Metrics endpoint
+app.get('/metrics', async (req, res) => {
+    activeTodosGauge.set(todos.length);
     res.set('Content-Type', register.contentType);
     res.end(await register.metrics());
 });
@@ -124,83 +133,105 @@ app.get('/api/todos', (req, res) => {
     res.json(todos);
 });
 
-app.post('/api/todos', (req, res) => {
+app.post('/api/todos', async (req, res) => {
     const todo = {
         id: todoId++,
         title: req.body.title,
         completed: false,
         createdAt: new Date()
     };
-    todos.push(todo);
-    todoCreatedTotal.inc();
     
-    // If cloud, try to sync with local
     if (IS_CLOUD) {
-        syncWithLocal('create', todo).catch(console.error);
-    }
-    
-    res.json(todo);
-});
-
-app.put('/api/todos/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const todo = todos.find(t => t.id === id);
-    if (todo) {
-        todo.completed = req.body.completed;
-        if (todo.completed) {
-            todoCompletedTotal.inc();
-        }
-        // If cloud, try to sync with local
-        if (IS_CLOUD) {
-            syncWithLocal('update', todo).catch(console.error);
-        }
-    }
-    res.json(todo);
-});
-
-app.delete('/api/todos/:id', (req, res) => {
-    const id = parseInt(req.params.id);
-    const todo = todos.find(t => t.id === id);
-    todos = todos.filter(t => t.id !== id);
-    todoDeletedTotal.inc();
-    
-    // If cloud, try to sync with local
-    if (IS_CLOUD && todo) {
-        syncWithLocal('delete', { id }).catch(console.error);
-    }
-    
-    res.json({ message: 'deleted' });
-});
-
-// Sync helper for cloud instance
-async function syncWithLocal(action, data) {
-    try {
-        if (action === 'create') {
+        // Cloud tries to push to local first
+        try {
             await fetch(`${LOCAL_API}/api/todos`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ title: data.title })
+                body: JSON.stringify({ title: req.body.title })
             });
-        } else if (action === 'update') {
-            await fetch(`${LOCAL_API}/api/todos/${data.id}`, {
+            // Then sync from local to get the exact data
+            await fetch(`${LOCAL_API}/sync-from-local`);
+            const response = await fetch(`${LOCAL_API}/api/todos`);
+            todos = await response.json();
+        } catch (error) {
+            // Local is down, store in cloud temporarily
+            todos.push(todo);
+            console.log('Local down, storing in cloud temp storage');
+        }
+    } else {
+        // Local is primary - just add
+        todos.push(todo);
+    }
+    
+    todoCreatedTotal.inc();
+    res.json(todo);
+});
+
+app.put('/api/todos/:id', async (req, res) => {
+    const id = parseInt(req.params.id);
+    
+    if (IS_CLOUD) {
+        try {
+            await fetch(`${LOCAL_API}/api/todos/${id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ completed: data.completed })
+                body: JSON.stringify({ completed: req.body.completed })
             });
-        } else if (action === 'delete') {
-            await fetch(`${LOCAL_API}/api/todos/${data.id}`, { method: 'DELETE' });
+            const response = await fetch(`${LOCAL_API}/api/todos`);
+            todos = await response.json();
+        } catch (error) {
+            const todo = todos.find(t => t.id === id);
+            if (todo) todo.completed = req.body.completed;
         }
-        console.log(`Synced ${action} to local`);
-    } catch (error) {
-        console.error(`Failed to sync ${action}:`, error.message);
+    } else {
+        const todo = todos.find(t => t.id === id);
+        if (todo) todo.completed = req.body.completed;
     }
+    
+    if (req.body.completed) todoCompletedTotal.inc();
+    res.json({ success: true });
+});
+
+app.delete('/api/todos/:id', async (req, res) => {
+    const id = parseInt(req.params.id);
+    
+    if (IS_CLOUD) {
+        try {
+            await fetch(`${LOCAL_API}/api/todos/${id}`, { method: 'DELETE' });
+            const response = await fetch(`${LOCAL_API}/api/todos`);
+            todos = await response.json();
+        } catch (error) {
+            todos = todos.filter(t => t.id !== id);
+        }
+    } else {
+        todos = todos.filter(t => t.id !== id);
+    }
+    
+    todoDeletedTotal.inc();
+    res.json({ message: 'deleted' });
+});
+
+// Periodic sync from local to cloud (cloud pulls from local every 30 seconds)
+if (IS_CLOUD) {
+    setInterval(async () => {
+        try {
+            const response = await fetch(`${LOCAL_API}/api/todos`);
+            const localTodos = await response.json();
+            todos = localTodos;
+            cloudSyncStatus.set(1);
+            console.log(`Synced from local: ${localTodos.length} todos`);
+        } catch (error) {
+            cloudSyncStatus.set(0);
+            console.log('Local not reachable, running in standalone mode');
+        }
+    }, 30000);
 }
 
-// HTML UI with sync status
+// HTML UI
 const html = `<!DOCTYPE html>
 <html>
 <head>
-    <title>Todo App ${IS_CLOUD ? '(Cloud)' : '(Local)'}</title>
+    <title>Todo App - ${IS_CLOUD ? 'Cloud Replica' : 'Local Primary'}</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -217,7 +248,7 @@ const html = `<!DOCTYPE html>
             overflow: hidden;
         }
         .header {
-            background: ${IS_CLOUD ? '#1a1a1a' : '#28a745'};
+            background: ${IS_CLOUD ? '#6c757d' : '#28a745'};
             color: white;
             padding: 20px;
         }
@@ -235,7 +266,6 @@ const html = `<!DOCTYPE html>
             margin-top: 8px;
             opacity: 0.9;
         }
-        .sync-status span { font-weight: bold; }
         .content { padding: 20px; }
         .todo-form {
             display: flex;
@@ -251,13 +281,13 @@ const html = `<!DOCTYPE html>
         }
         .todo-form button {
             padding: 10px 20px;
-            background: ${IS_CLOUD ? '#1a1a1a' : '#28a745'};
+            background: ${IS_CLOUD ? '#6c757d' : '#28a745'};
             color: white;
             border: none;
             border-radius: 4px;
             cursor: pointer;
         }
-        .todo-form button:hover { background: ${IS_CLOUD ? '#333' : '#218838'}; }
+        .todo-form button:hover { background: ${IS_CLOUD ? '#5a6268' : '#218838'}; }
         .todo-item {
             display: flex;
             align-items: center;
@@ -293,7 +323,6 @@ const html = `<!DOCTYPE html>
         .local-status {
             margin-top: 10px;
             padding: 10px;
-            background: #e8f4f8;
             border-radius: 4px;
             font-size: 12px;
             text-align: center;
@@ -303,8 +332,8 @@ const html = `<!DOCTYPE html>
 <body>
 <div class="container">
     <div class="header">
-        <h1>Todo List <span class="badge">${IS_CLOUD ? '☁️ Cloud' : '💻 Local'}</span></h1>
-        <div class="sync-status" id="syncStatus">Checking sync status...</div>
+        <h1>Todo List <span class="badge">${IS_CLOUD ? '☁️ Cloud Replica' : '💻 Local Primary'}</span></h1>
+        <div class="sync-status" id="syncStatus">${IS_CLOUD ? 'Syncing with local...' : 'Local is primary source of truth'}</div>
     </div>
     <div class="content">
         <div class="todo-form">
@@ -313,13 +342,10 @@ const html = `<!DOCTYPE html>
         </div>
         <div id="todos"></div>
         <div class="stats" id="stats"></div>
-        <div class="local-status" id="localStatus">Checking local service...</div>
+        <div class="local-status" id="localStatus"></div>
     </div>
 </div>
 <script>
-    let syncCheckInterval;
-    let healthCheckInterval;
-    
     async function loadTodos() {
         try {
             const res = await fetch('/api/todos');
@@ -345,39 +371,25 @@ const html = `<!DOCTYPE html>
         }
     }
     
-    async function checkSyncStatus() {
-        try {
-            const res = await fetch('/sync-from-local');
-            const data = await res.json();
-            const syncDiv = document.getElementById('syncStatus');
-            if (data.synced) {
-                syncDiv.innerHTML = '✅ Synced with local: ' + data.count + ' tasks';
-                syncDiv.style.color = '#d4edda';
-            } else {
-                syncDiv.innerHTML = '⚠️ Local service not reachable - running in standalone mode';
-                syncDiv.style.color = '#fff3cd';
-            }
-        } catch (error) {
-            document.getElementById('syncStatus').innerHTML = '⚠️ Cannot connect to local service';
-        }
-    }
-    
     async function checkLocalHealth() {
+        if (!${IS_CLOUD}) return;
         try {
             const res = await fetch('/check-local');
             const data = await res.json();
             const localDiv = document.getElementById('localStatus');
             if (data.localRunning) {
-                localDiv.innerHTML = '🟢 Local service is RUNNING - Data will sync both ways';
+                localDiv.innerHTML = '🟢 Local primary is RUNNING - Cloud is synced';
                 localDiv.style.background = '#d4edda';
                 localDiv.style.color = '#155724';
+                document.getElementById('syncStatus').innerHTML = '✅ Synced with local primary';
             } else {
-                localDiv.innerHTML = '🔴 Local service is DOWN - Cloud running in standalone mode. Start local service to sync.';
+                localDiv.innerHTML = '🔴 Local primary is DOWN - Cloud running in standalone mode. Start local to sync.';
                 localDiv.style.background = '#f8d7da';
                 localDiv.style.color = '#721c24';
+                document.getElementById('syncStatus').innerHTML = '⚠️ Local not reachable - Running standalone';
             }
         } catch (error) {
-            document.getElementById('localStatus').innerHTML = '🔴 Cannot detect local service - Make sure local app is running on port 3000';
+            document.getElementById('localStatus').innerHTML = '🔴 Cannot reach local primary';
             document.getElementById('localStatus').style.background = '#f8d7da';
             document.getElementById('localStatus').style.color = '#721c24';
         }
@@ -400,7 +412,7 @@ const html = `<!DOCTYPE html>
         });
         input.value = '';
         loadTodos();
-        checkSyncStatus();
+        if (${IS_CLOUD}) checkLocalHealth();
     }
     
     async function toggleTodo(id, completed) {
@@ -410,23 +422,20 @@ const html = `<!DOCTYPE html>
             body: JSON.stringify({ completed })
         });
         loadTodos();
-        checkSyncStatus();
     }
     
     async function deleteTodo(id) {
         if (confirm('Delete this task?')) {
             await fetch('/api/todos/' + id, { method: 'DELETE' });
             loadTodos();
-            checkSyncStatus();
         }
     }
     
-    // Start monitoring
     loadTodos();
-    checkSyncStatus();
-    checkLocalHealth();
-    syncCheckInterval = setInterval(checkSyncStatus, 30000);
-    healthCheckInterval = setInterval(checkLocalHealth, 60000);
+    if (${IS_CLOUD}) {
+        checkLocalHealth();
+        setInterval(checkLocalHealth, 30000);
+    }
 </script>
 </body>
 </html>`;
@@ -436,9 +445,13 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Todo app running as ${IS_CLOUD ? 'CLOUD' : 'LOCAL'} on http://0.0.0.0:${PORT}`);
+    console.log(`✅ Todo app running as ${IS_CLOUD ? 'CLOUD REPLICA' : 'LOCAL PRIMARY'}`);
     console.log(`📊 Metrics at http://0.0.0.0:${PORT}/metrics`);
-    console.log(`🔄 Sync with ${IS_CLOUD ? 'local' : 'cloud'} configured`);
+    if (IS_CLOUD) {
+        console.log(`🔄 Syncing from local: ${LOCAL_API}`);
+    } else {
+        console.log(`📍 Primary source of truth`);
+    }
 });
 
 process.on('SIGTERM', () => {
