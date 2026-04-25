@@ -3,14 +3,14 @@ const mongoose = require('mongoose');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://admin:admin@cluster0.z2grjun.mongodb.net/todo?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://admin:password123@mongodb:27017/todo?authSource=admin';
 
 app.use(express.json());
 
 mongoose.connect(MONGODB_URI);
 const db = mongoose.connection;
 db.on('error', (err) => console.error('MongoDB error:', err.message));
-db.once('open', () => console.log('Connected to MongoDB Atlas'));
+db.once('open', () => console.log('Connected to MongoDB'));
 
 const Todo = mongoose.model('Todo', new mongoose.Schema({
     title: String,
@@ -18,27 +18,22 @@ const Todo = mongoose.model('Todo', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 }));
 
-// Health check
-app.get('/health', (req, res) => res.json({ status: 'ok', db: 'atlas' }));
-
-// Prometheus metrics
-app.get('/metrics', async (req, res) => {
-    const todos = await Todo.find();
-    res.set('Content-Type', 'text/plain');
+// Homepage
+app.get('/', (req, res) => {
     res.send(`
-# HELP todo_total Total number of todos
-# TYPE todo_total gauge
-todo_total ${todos.length}
-# HELP todo_completed_total Total completed todos
-# TYPE todo_completed_total gauge
-todo_completed_total ${todos.filter(t => t.completed).length}
-# HELP todo_created_total Total todos created
-# TYPE todo_created_total counter
-todo_created_total ${todos.length}
-`));
+<!DOCTYPE html>
+<html>
+<head><title>Todo App</title></head>
+<body style="font-family:system-ui;padding:20px">
+<h1>Todo App</h1>
+<p>API at <a href="/api/todos">/api/todos</a></p>
+</body>
+</html>
+    `);
 });
 
-// API endpoints
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
 app.get('/api/todos', async (req, res) => {
     const todos = await Todo.find().sort('-createdAt');
     res.json(todos);
