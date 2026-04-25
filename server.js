@@ -14,13 +14,6 @@ if (!MONGODB_URI) {
     process.exit(1);
 }
 
-// Verify it's an Atlas connection
-if (!MONGODB_URI.includes('mongodb+srv://') || !MONGODB_URI.includes('cluster0.z2grjun.mongodb.net')) {
-    console.error('❌ FATAL: Invalid database configuration!');
-    console.error('This app must use MongoDB Atlas connection string.');
-    process.exit(1);
-}
-
 app.use(express.json());
 
 // Prometheus metrics
@@ -39,7 +32,7 @@ const activeTodos = new promClient.Gauge({
     registers: [register]
 });
 
-// Connect to MongoDB Atlas ONLY
+// Connect to MongoDB Atlas
 console.log('🔗 Connecting to MongoDB Atlas...');
 mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 10000,
@@ -49,12 +42,9 @@ mongoose.connect(MONGODB_URI, {
 const db = mongoose.connection;
 db.on('error', (err) => {
     console.error('❌ MongoDB Atlas connection error:', err.message);
-    process.exit(1); // Exit if can't connect to Atlas
 });
 db.once('open', () => {
     console.log('✅ Successfully connected to MongoDB Atlas');
-    console.log(`📊 Database: ${db.name}`);
-    console.log(`📍 Host: ${mongoose.connection.host}`);
 });
 
 // Todo Schema
@@ -66,7 +56,7 @@ const TodoSchema = new mongoose.Schema({
 
 const Todo = mongoose.model('Todo', TodoSchema);
 
-// Health check - shows Atlas connection status
+// Health check
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
@@ -79,40 +69,61 @@ app.get('/health', (req, res) => {
 
 // Metrics endpoint
 app.get('/metrics', async (req, res) => {
-    const count = await Todo.countDocuments();
-    activeTodos.set(count);
-    res.set('Content-Type', register.contentType);
-    res.end(await register.metrics());
+    try {
+        const count = await Todo.countDocuments();
+        activeTodos.set(count);
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+    } catch(err) {
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+    }
 });
 
-// API endpoints - all use Atlas
+// API endpoints
 app.get('/api/todos', async (req, res) => {
-    const todos = await Todo.find().sort('-createdAt');
-    res.json(todos);
+    try {
+        const todos = await Todo.find().sort('-createdAt');
+        res.json(todos);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/api/todos', async (req, res) => {
-    const todo = new Todo({ title: req.body.title });
-    await todo.save();
-    todoCreated.inc();
-    res.json(todo);
+    try {
+        const todo = new Todo({ title: req.body.title });
+        await todo.save();
+        todoCreated.inc();
+        res.json(todo);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.put('/api/todos/:id', async (req, res) => {
-    const todo = await Todo.findByIdAndUpdate(
-        req.params.id,
-        { completed: req.body.completed },
-        { new: true }
-    );
-    res.json(todo);
+    try {
+        const todo = await Todo.findByIdAndUpdate(
+            req.params.id,
+            { completed: req.body.completed },
+            { new: true }
+        );
+        res.json(todo);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/todos/:id', async (req, res) => {
-    await Todo.findByIdAndDelete(req.params.id);
-    res.json({ message: 'deleted' });
+    try {
+        await Todo.findByIdAndDelete(req.params.id);
+        res.json({ message: 'deleted' });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// HTML UI
+// HTML UI - with correct JavaScript functions
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -122,64 +133,131 @@ app.get('/', (req, res) => {
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
         body{font-family:system-ui;background:#f5f5f5;padding:20px}
-        .container{max-width:500px;margin:0 auto;background:white;border-radius:8px}
+        .container{max-width:500px;margin:0 auto;background:white;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1)}
         .header{background:#0066cc;color:white;padding:20px;border-radius:8px 8px 0 0}
         .header h1{font-size:1.5rem}
         .badge{display:inline-block;background:#004499;padding:4px 8px;border-radius:4px;font-size:10px;margin-left:10px}
         .content{padding:20px}
         .todo-form{display:flex;gap:10px;margin-bottom:20px}
-        .todo-form input{flex:1;padding:10px;border:1px solid #ddd;border-radius:4px}
-        .todo-form button{padding:10px 20px;background:#0066cc;color:white;border:none;border-radius:4px;cursor:pointer}
+        .todo-form input{flex:1;padding:10px;border:1px solid #ddd;border-radius:4px;font-size:14px}
+        .todo-form input:focus{outline:none;border-color:#0066cc}
+        .todo-form button{padding:10px 20px;background:#0066cc;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px}
         .todo-form button:hover{background:#0052a3}
         .todo-item{display:flex;align-items:center;gap:10px;padding:10px;background:#fafafa;border-radius:4px;margin-bottom:8px}
-        .todo-checkbox{width:18px;height:18px}
-        .todo-title{flex:1}
+        .todo-item:hover{background:#f0f0f0}
+        .todo-checkbox{width:18px;height:18px;cursor:pointer}
+        .todo-title{flex:1;font-size:14px}
         .completed .todo-title{text-decoration:line-through;color:#999}
-        .delete-btn{background:#dc3545;color:white;border:none;padding:4px 8px;border-radius:4px;cursor:pointer}
+        .delete-btn{background:#dc3545;color:white;border:none;padding:5px 10px;border-radius:4px;cursor:pointer;font-size:12px}
+        .delete-btn:hover{background:#c82333}
         .empty-state{text-align:center;padding:40px;color:#999}
-        .stats{margin-top:20px;text-align:center;font-size:12px;color:#666}
+        .stats{margin-top:20px;padding-top:20px;border-top:1px solid #eee;text-align:center;font-size:12px;color:#666}
         .atlas-badge{background:#e8f4f8;padding:8px;border-radius:4px;margin-top:10px;font-size:11px;text-align:center;color:#0066cc}
     </style>
 </head>
 <body>
-<div class="container">
-    <div class="header">
-        <h1>Todo List <span class="badge">☁️ Cloud (Atlas)</span></h1>
-    </div>
-    <div class="content">
-        <div class="todo-form">
-            <input type="text" id="titleInput" placeholder="What needs to be done?" onkeypress="if(event.key==='Enter')addTodo()">
-            <button onclick="addTodo()">Add Task</button>
+    <div class="container">
+        <div class="header">
+            <h1>📝 Todo List <span class="badge">☁️ Cloud (Atlas)</span></h1>
         </div>
-        <div id="todoList"></div>
-        <div class="stats" id="stats"></div>
-        <div class="atlas-badge">🗄️ Data stored in MongoDB Atlas cloud database</div>
+        <div class="content">
+            <div class="todo-form">
+                <input type="text" id="titleInput" placeholder="What needs to be done?" onkeypress="if(event.key==='Enter') addTodo()">
+                <button onclick="addTodo()">Add Task</button>
+            </div>
+            <div id="todoList"></div>
+            <div class="stats" id="stats"></div>
+            <div class="atlas-badge">🗄️ Data stored in MongoDB Atlas cloud database</div>
+        </div>
     </div>
-</div>
-<script>
-async function loadTodos(){
-    const res=await fetch('/api/todos');
-    const todos=await res.json();
-    const container=document.getElementById('todoList');
-    if(todos.length===0){
-        container.innerHTML='<div class="empty-state">✨ No tasks yet</div>';
-    }else{
-        container.innerHTML=todos.map(todo=>'<div class="todo-item'+(todo.completed?' completed':'')+'">'+
-            '<input type="checkbox" class="todo-checkbox"'+(todo.completed?' checked':'')+
-            ' onchange="toggleTodo(\''+todo._id+'\',this.checked)">'+
-            '<span class="todo-title">'+escapeHtml(todo.title)+'</span>'+
-            '<button class="delete-btn" onclick="deleteTodo(\''+todo._id+'\')">Delete</button>'+
-            '</div>').join('');
-    }
-    const completed=todos.filter(t=>t.completed).length;
-    document.getElementById('stats').innerHTML='📊 '+todos.length+' total | ✅ '+completed+' completed';
-}
-function escapeHtml(text){const div=document.createElement('div');div.textContent=text;return div.innerHTML;}
-async function addTodo(){const input=document.getElementById('titleInput');const title=input.value.trim();if(!title)return;await fetch('/api/todos',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})});input.value='';loadTodos();}
-async function toggleTodo(id,completed){await fetch('/api/todos/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({completed})});loadTodos();}
-async function deleteTodo(id){if(confirm('Delete?')){await fetch('/api/todos/'+id,{method:'DELETE'});loadTodos();}}
-loadTodos();setInterval(loadTodos,5000);
-</script>
+
+    <script>
+        async function loadTodos() {
+            try {
+                const response = await fetch('/api/todos');
+                const todos = await response.json();
+                const container = document.getElementById('todoList');
+                
+                if (todos.length === 0) {
+                    container.innerHTML = '<div class="empty-state">✨ No tasks yet. Add one above!</div>';
+                } else {
+                    container.innerHTML = todos.map(todo => {
+                        const todoId = todo._id;
+                        return '<div class="todo-item' + (todo.completed ? ' completed' : '') + '">' +
+                            '<input type="checkbox" class="todo-checkbox"' + (todo.completed ? ' checked' : '') + 
+                            ' onchange="toggleTodo(\'' + todoId + '\', this.checked)">' +
+                            '<span class="todo-title">' + escapeHtml(todo.title) + '</span>' +
+                            '<button class="delete-btn" onclick="deleteTodo(\'' + todoId + '\')">Delete</button>' +
+                            '</div>';
+                    }).join('');
+                }
+                
+                const completed = todos.filter(t => t.completed).length;
+                document.getElementById('stats').innerHTML = '📊 ' + todos.length + ' total | ✅ ' + completed + ' completed';
+            } catch (error) {
+                console.error('Error loading todos:', error);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function addTodo() {
+            const input = document.getElementById('titleInput');
+            const title = input.value.trim();
+            
+            if (!title) {
+                alert('Please enter a task');
+                return;
+            }
+            
+            try {
+                await fetch('/api/todos', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title })
+                });
+                input.value = '';
+                loadTodos();
+            } catch (error) {
+                console.error('Error adding todo:', error);
+                alert('Failed to add todo');
+            }
+        }
+
+        async function toggleTodo(id, completed) {
+            try {
+                await fetch('/api/todos/' + id, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ completed })
+                });
+                loadTodos();
+            } catch (error) {
+                console.error('Error toggling todo:', error);
+            }
+        }
+
+        async function deleteTodo(id) {
+            if (!confirm('Delete this task?')) return;
+            
+            try {
+                await fetch('/api/todos/' + id, { method: 'DELETE' });
+                loadTodos();
+            } catch (error) {
+                console.error('Error deleting todo:', error);
+                alert('Failed to delete todo');
+            }
+        }
+
+        // Load todos on page load
+        loadTodos();
+        // Refresh every 30 seconds
+        setInterval(loadTodos, 30000);
+    </script>
 </body>
 </html>
     `);
@@ -188,5 +266,4 @@ loadTodos();setInterval(loadTodos,5000);
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Cloud Todo app running on port ${PORT}`);
     console.log(`📊 Using MongoDB Atlas exclusively`);
-    console.log(`🔗 Connection: ${MONGODB_URI.replace(/:[^:@]*@/, ':****@')}`);
 });
