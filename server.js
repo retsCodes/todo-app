@@ -1,129 +1,57 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const promClient = require('prom-client');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://admin:admin@cluster0.z2grjun.mongodb.net/todo?retryWrites=true&w=majority';
 
 app.use(express.json());
 
-// Only initialize Prometheus if prom-client is available
-let register;
-let todoCreated;
-let activeTodos;
-
-try {
-    register = new promClient.Registry();
-    promClient.collectDefaultMetrics({ register });
-    
-    todoCreated = new promClient.Counter({
-        name: 'todo_created_total',
-        help: 'Total number of todos created',
-        registers: [register]
-    });
-    
-    activeTodos = new promClient.Gauge({
-        name: 'active_todos_total',
-        help: 'Current number of active todos',
-        registers: [register]
-    });
-} catch(err) {
-    console.log('Prometheus metrics disabled:', err.message);
-}
-
-// Connect to MongoDB Atlas
-console.log('Connecting to MongoDB Atlas...');
-mongoose.connect(MONGODB_URI, {
-    serverSelectionTimeoutMS: 5000,
-    connectTimeoutMS: 10000
-});
-
-const db = mongoose.connection;
-db.on('error', (err) => {
-    console.error('MongoDB connection error:', err.message);
-});
-db.once('open', () => {
-    console.log('✅ Connected to MongoDB Atlas successfully');
-});
-
-// Todo Schema
-const TodoSchema = new mongoose.Schema({
-    title: { type: String, required: true },
-    completed: { type: Boolean, default: false },
-    createdAt: { type: Date, default: Date.now }
-});
-
-const Todo = mongoose.model('Todo', TodoSchema);
+// In-memory storage (no MongoDB dependency for now)
+let todos = [];
+let nextId = 1;
 
 // Health check
 app.get('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        dbConnected: mongoose.connection.readyState === 1,
-        instance: process.env.INSTANCE_NAME || 'cloud',
-        timestamp: new Date().toISOString()
-    });
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Metrics endpoint
-app.get('/metrics', async (req, res) => {
-    if (register) {
-        try {
-            const count = await Todo.countDocuments();
-            activeTodos.set(count);
-            res.set('Content-Type', register.contentType);
-            res.end(await register.metrics());
-        } catch(err) {
-            res.set('Content-Type', register.contentType);
-            res.end(await register.metrics());
-        }
-    } else {
-        res.send('# Prometheus metrics disabled\n');
-    }
+// Simple metrics endpoint
+app.get('/metrics', (req, res) => {
+    res.send(`
+# HELP todo_count Total number of todos
+# TYPE todo_count gauge
+todo_count ${todos.length}
+    `);
 });
 
 // API endpoints
-app.get('/api/todos', async (req, res) => {
-    try {
-        const todos = await Todo.find().sort('-createdAt');
-        res.json(todos);
-    } catch(err) {
-        res.status(500).json({ error: err.message });
-    }
+app.get('/api/todos', (req, res) => {
+    res.json(todos);
 });
 
-app.post('/api/todos', async (req, res) => {
-    try {
-        const todo = new Todo({ title: req.body.title });
-        await todo.save();
-        if (todoCreated) todoCreated.inc();
-        res.json(todo);
-    } catch(err) {
-        res.status(500).json({ error: err.message });
-    }
+app.post('/api/todos', (req, res) => {
+    const todo = {
+        id: nextId++,
+        title: req.body.title,
+        completed: false,
+        createdAt: new Date()
+    };
+    todos.push(todo);
+    res.json(todo);
 });
 
-app.put('/api/todos/:id', async (req, res) => {
-    try {
-        const todo = await Todo.findByIdAndUpdate(
-            req.params.id,
-            { completed: req.body.completed },
-            { new: true }
-        );
-        res.json(todo);
-    } catch(err) {
-        res.status(500).json({ error: err.message });
+app.put('/api/todos/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    const todo = todos.find(t => t.id === id);
+    if (todo) {
+        todo.completed = req.body.completed;
     }
+    res.json(todo);
 });
 
-app.delete('/api/todos/:id', async (req, res) => {
-    try {
-        await Todo.findByIdAndDelete(req.params.id);
-        res.json({ message: 'deleted' });
-    } catch(err) {
-        res.status(500).json({ error: err.message });
-    }
+app.delete('/api/todos/:id', (req, res) => {
+    const id = parseInt(req.params.id);
+    todos = todos.filter(t => t.id !== id);
+    res.json({ message: 'deleted' });
 });
 
 // Simple HTML
@@ -152,7 +80,7 @@ body{font-family:system-ui;background:#f5f5f5;padding:20px}
 </head>
 <body>
 <div class="container">
-<div class="header"><h1>Todo List</h1></div>
+<div class="header"><h1>Todo App</h1></div>
 <div class="content">
 <div class="todo-form">
 <input type="text" id="title" placeholder="What needs to be done?" onkeypress="if(event.key==='Enter')addTodo()">
@@ -172,9 +100,9 @@ async function loadTodos(){
     }else{
         container.innerHTML=todos.map(todo=>'<div class="todo-item'+(todo.completed?' completed':'')+'">'+
             '<input type="checkbox" class="todo-checkbox"'+(todo.completed?' checked':'')+
-            ' onchange="toggleTodo(\''+todo._id+'\',this.checked)">'+
+            ' onchange="toggleTodo('+todo.id+',this.checked)">'+
             '<span class="todo-title">'+escapeHtml(todo.title)+'</span>'+
-            '<button class="delete-btn" onclick="deleteTodo(\''+todo._id+'\')">Delete</button>'+
+            '<button class="delete-btn" onclick="deleteTodo('+todo.id+')">Delete</button>'+
             '</div>').join('');
     }
     const completed=todos.filter(t=>t.completed).length;
@@ -192,6 +120,6 @@ loadTodos();setInterval(loadTodos,5000);
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Todo app running on port ${PORT}`);
-    console.log(`📊 Database: ${MONGODB_URI.includes('mongodb+srv') ? 'MongoDB Atlas' : 'Local'}`);
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`📊 Running in-memory (no MongoDB dependency)`);
 });
