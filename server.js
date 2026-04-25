@@ -4,16 +4,11 @@ const promClient = require('prom-client');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI;
-
-if (!MONGODB_URI) {
-    console.error('❌ MONGODB_URI environment variable is required!');
-    process.exit(1);
-}
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://admin:admin@cluster0.z2grjun.mongodb.net/todo?retryWrites=true&w=majority';
 
 app.use(express.json());
 
-// Prometheus metrics
+// Initialize Prometheus metrics
 const register = new promClient.Registry();
 promClient.collectDefaultMetrics({ register });
 
@@ -29,80 +24,97 @@ const activeTodos = new promClient.Gauge({
     registers: [register]
 });
 
-const dbStatus = new promClient.Gauge({
-    name: 'db_connection_status',
-    help: 'Database connection status (1=connected, 0=disconnected)',
-    registers: [register]
-});
-
 // Connect to MongoDB Atlas
+console.log('Attempting to connect to MongoDB Atlas...');
 mongoose.connect(MONGODB_URI, {
-    serverSelectionTimeoutMS: 5000
+    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 10000
 });
 
 const db = mongoose.connection;
 db.on('error', (err) => {
-    console.error('MongoDB error:', err.message);
-    dbStatus.set(0);
+    console.error('MongoDB connection error:', err.message);
 });
 db.once('open', () => {
-    console.log('✅ Connected to MongoDB Atlas');
-    dbStatus.set(1);
+    console.log('✅ Successfully connected to MongoDB Atlas');
 });
 
 // Todo Schema
-const todoSchema = new mongoose.Schema({
+const TodoSchema = new mongoose.Schema({
     title: { type: String, required: true },
     completed: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 });
 
-const Todo = mongoose.model('Todo', todoSchema);
+const Todo = mongoose.model('Todo', TodoSchema);
 
-// Routes
+// Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
+    res.json({
+        status: 'ok',
         dbConnected: mongoose.connection.readyState === 1,
-        todoCount: 0,
+        instance: process.env.INSTANCE_NAME || 'unknown',
         timestamp: new Date().toISOString()
     });
 });
 
+// Metrics endpoint
 app.get('/metrics', async (req, res) => {
-    const count = await Todo.countDocuments();
-    activeTodos.set(count);
-    res.set('Content-Type', register.contentType);
-    res.end(await register.metrics());
+    try {
+        const count = await Todo.countDocuments();
+        activeTodos.set(count);
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+    } catch (err) {
+        res.set('Content-Type', register.contentType);
+        res.end(await register.metrics());
+    }
 });
 
+// API endpoints
 app.get('/api/todos', async (req, res) => {
-    const todos = await Todo.find().sort('-createdAt');
-    res.json(todos);
+    try {
+        const todos = await Todo.find().sort('-createdAt');
+        res.json(todos);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.post('/api/todos', async (req, res) => {
-    const todo = new Todo({ title: req.body.title });
-    await todo.save();
-    todoCreated.inc();
-    res.json(todo);
+    try {
+        const todo = new Todo({ title: req.body.title });
+        await todo.save();
+        todoCreated.inc();
+        res.json(todo);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.put('/api/todos/:id', async (req, res) => {
-    const todo = await Todo.findByIdAndUpdate(
-        req.params.id,
-        { completed: req.body.completed },
-        { new: true }
-    );
-    res.json(todo);
+    try {
+        const todo = await Todo.findByIdAndUpdate(
+            req.params.id,
+            { completed: req.body.completed },
+            { new: true }
+        );
+        res.json(todo);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.delete('/api/todos/:id', async (req, res) => {
-    await Todo.findByIdAndDelete(req.params.id);
-    res.json({ message: 'deleted' });
+    try {
+        await Todo.findByIdAndDelete(req.params.id);
+        res.json({ message: 'deleted' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// HTML UI
+// Simple HTML interface
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
@@ -114,13 +126,12 @@ app.get('/', (req, res) => {
         body{font-family:system-ui;background:#f5f5f5;padding:20px}
         .container{max-width:500px;margin:0 auto;background:white;border-radius:8px}
         .header{background:#28a745;color:white;padding:20px}
-        .header h1{font-size:1.5rem}
         .content{padding:20px}
         .todo-form{display:flex;gap:10px;margin-bottom:20px}
         .todo-form input{flex:1;padding:10px;border:1px solid #ddd;border-radius:4px}
         .todo-form button{padding:10px 20px;background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer}
         .todo-item{display:flex;align-items:center;gap:10px;padding:10px;background:#fafafa;border-radius:4px;margin-bottom:8px}
-        .todo-checkbox{width:18px;height:18px}
+        .todo-checkbox{width:18px;height:18px;cursor:pointer}
         .todo-title{flex:1}
         .completed .todo-title{text-decoration:line-through;color:#999}
         .delete-btn{background:#dc3545;color:white;border:none;padding:4px 8px;border-radius:4px;cursor:pointer}
@@ -130,9 +141,7 @@ app.get('/', (req, res) => {
 </head>
 <body>
 <div class="container">
-    <div class="header">
-        <h1>Todo List</h1>
-    </div>
+    <div class="header"><h1>Todo List</h1></div>
     <div class="content">
         <div class="todo-form">
             <input type="text" id="title" placeholder="What needs to be done?" onkeypress="if(event.key==='Enter')addTodo()">
@@ -152,9 +161,9 @@ async function loadTodos(){
     }else{
         container.innerHTML=todos.map(todo=>'<div class="todo-item'+(todo.completed?' completed':'')+'">'+
             '<input type="checkbox" class="todo-checkbox"'+(todo.completed?' checked':'')+
-            ' onchange="toggleTodo(\\''+todo._id+'\\',this.checked)">'+
+            ' onchange="toggleTodo(\''+todo._id+'\',this.checked)">'+
             '<span class="todo-title">'+escapeHtml(todo.title)+'</span>'+
-            '<button class="delete-btn" onclick="deleteTodo(\\''+todo._id+'\\')">Delete</button>'+
+            '<button class="delete-btn" onclick="deleteTodo(\''+todo._id+'\')">Delete</button>'+
             '</div>').join('');
     }
     const completed=todos.filter(t=>t.completed).length;
@@ -171,12 +180,8 @@ loadTodos();setInterval(loadTodos,5000);
     `);
 });
 
+// Start server
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Todo app running on port ${PORT}`);
-    console.log(`📊 MongoDB: Atlas (shared database)`);
-});
-
-process.on('SIGTERM', () => {
-    mongoose.connection.close();
-    process.exit(0);
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`📊 MongoDB URI: ${MONGODB_URI.replace(/:[^:@]*@/, ':****@')}`);
 });
