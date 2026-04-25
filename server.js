@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-// Read from environment variable, fallback to Atlas (works locally too)
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://admin:admin@cluster0.z2grjun.mongodb.net/todo?retryWrites=true&w=majority';
 
 app.use(express.json());
@@ -18,6 +17,20 @@ const Todo = mongoose.model('Todo', new mongoose.Schema({
     completed: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 }));
+
+// Homepage
+app.get('/', (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html>
+<head><title>Todo App</title></head>
+<body style="font-family:system-ui;padding:20px">
+<h1>Todo App is Running</h1>
+<p>API at <a href="/api/todos">/api/todos</a></p>
+</body>
+</html>
+    `);
+});
 
 app.get('/health', (req, res) => res.json({ status: 'ok', db: 'atlas' }));
 
@@ -42,4 +55,4 @@ app.delete('/api/todos/:id', async (req, res) => {
     res.json({ message: 'deleted' });
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Server on port ${PORT}`));
