@@ -4,26 +4,43 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Simple in-memory storage (no MongoDB dependency)
+// In-memory storage
 let todos = [];
 let nextId = 1;
+let requestCount = 0;
 
 // Health check
 app.get('/health', (req, res) => {
-    res.json({ status: 'ok', instance: 'cloud', timestamp: new Date().toISOString() });
+    res.json({ 
+        status: 'ok', 
+        todos: todos.length,
+        instance: 'cloud',
+        timestamp: new Date().toISOString()
+    });
 });
 
-// Metrics endpoint
+// Prometheus metrics endpoint
 app.get('/metrics', (req, res) => {
-    res.set('Content-Type', 'text/plain');
-    res.send(`
-# HELP http_requests_total Total HTTP requests
-# TYPE http_requests_total counter
-http_requests_total 0
-# HELP todo_count Current todos
-# TYPE todo_count gauge
-todo_count ${todos.length}
-    `);
+    res.set('Content-Type', 'text/plain; charset=utf-8');
+    res.write('# HELP todo_total Total number of todos\n');
+    res.write('# TYPE todo_total gauge\n');
+    res.write(`todo_total ${todos.length}\n`);
+    res.write('# HELP todo_created_total Total todos created\n');
+    res.write('# TYPE todo_created_total counter\n');
+    res.write(`todo_created_total ${nextId - 1}\n`);
+    res.write('# HELP http_requests_total Total HTTP requests\n');
+    res.write('# TYPE http_requests_total counter\n');
+    res.write(`http_requests_total ${requestCount}\n`);
+    res.write('# HELP app_info App information\n');
+    res.write('# TYPE app_info gauge\n');
+    res.write(`app_info{instance="cloud",version="1.0"} 1\n`);
+    res.end();
+});
+
+// Request counter middleware
+app.use((req, res, next) => {
+    requestCount++;
+    next();
 });
 
 // API endpoints
@@ -61,7 +78,6 @@ app.get('/', (req, res) => {
 body{font-family:system-ui;background:#f5f5f5;padding:20px}
 .container{max-width:500px;margin:0 auto;background:white;border-radius:8px}
 .header{background:#0066cc;color:white;padding:20px}
-.header h1{font-size:1.5rem}
 .content{padding:20px}
 .todo-form{display:flex;gap:10px;margin-bottom:20px}
 .todo-form input{flex:1;padding:10px;border:1px solid #ddd;border-radius:4px}
@@ -118,7 +134,5 @@ loadTodos();
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Cloud app running on port ${PORT}`);
-    console.log(`📊 Metrics at /metrics`);
+    console.log(`📊 Metrics available at /metrics`);
 });
-
-process.on('SIGTERM', () => process.exit(0));
