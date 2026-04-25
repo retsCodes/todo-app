@@ -8,24 +8,32 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://admin:admin@cluste
 
 app.use(express.json());
 
-// Initialize Prometheus metrics
-const register = new promClient.Registry();
-promClient.collectDefaultMetrics({ register });
+// Only initialize Prometheus if prom-client is available
+let register;
+let todoCreated;
+let activeTodos;
 
-const todoCreated = new promClient.Counter({
-    name: 'todo_created_total',
-    help: 'Total number of todos created',
-    registers: [register]
-});
-
-const activeTodos = new promClient.Gauge({
-    name: 'active_todos_total',
-    help: 'Current number of active todos',
-    registers: [register]
-});
+try {
+    register = new promClient.Registry();
+    promClient.collectDefaultMetrics({ register });
+    
+    todoCreated = new promClient.Counter({
+        name: 'todo_created_total',
+        help: 'Total number of todos created',
+        registers: [register]
+    });
+    
+    activeTodos = new promClient.Gauge({
+        name: 'active_todos_total',
+        help: 'Current number of active todos',
+        registers: [register]
+    });
+} catch(err) {
+    console.log('Prometheus metrics disabled:', err.message);
+}
 
 // Connect to MongoDB Atlas
-console.log('Attempting to connect to MongoDB Atlas...');
+console.log('Connecting to MongoDB Atlas...');
 mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 5000,
     connectTimeoutMS: 10000
@@ -36,7 +44,7 @@ db.on('error', (err) => {
     console.error('MongoDB connection error:', err.message);
 });
 db.once('open', () => {
-    console.log('✅ Successfully connected to MongoDB Atlas');
+    console.log('✅ Connected to MongoDB Atlas successfully');
 });
 
 // Todo Schema
@@ -48,26 +56,30 @@ const TodoSchema = new mongoose.Schema({
 
 const Todo = mongoose.model('Todo', TodoSchema);
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
     res.json({
         status: 'ok',
         dbConnected: mongoose.connection.readyState === 1,
-        instance: process.env.INSTANCE_NAME || 'unknown',
+        instance: process.env.INSTANCE_NAME || 'cloud',
         timestamp: new Date().toISOString()
     });
 });
 
 // Metrics endpoint
 app.get('/metrics', async (req, res) => {
-    try {
-        const count = await Todo.countDocuments();
-        activeTodos.set(count);
-        res.set('Content-Type', register.contentType);
-        res.end(await register.metrics());
-    } catch (err) {
-        res.set('Content-Type', register.contentType);
-        res.end(await register.metrics());
+    if (register) {
+        try {
+            const count = await Todo.countDocuments();
+            activeTodos.set(count);
+            res.set('Content-Type', register.contentType);
+            res.end(await register.metrics());
+        } catch(err) {
+            res.set('Content-Type', register.contentType);
+            res.end(await register.metrics());
+        }
+    } else {
+        res.send('# Prometheus metrics disabled\n');
     }
 });
 
@@ -76,7 +88,7 @@ app.get('/api/todos', async (req, res) => {
     try {
         const todos = await Todo.find().sort('-createdAt');
         res.json(todos);
-    } catch (err) {
+    } catch(err) {
         res.status(500).json({ error: err.message });
     }
 });
@@ -85,9 +97,9 @@ app.post('/api/todos', async (req, res) => {
     try {
         const todo = new Todo({ title: req.body.title });
         await todo.save();
-        todoCreated.inc();
+        if (todoCreated) todoCreated.inc();
         res.json(todo);
-    } catch (err) {
+    } catch(err) {
         res.status(500).json({ error: err.message });
     }
 });
@@ -100,7 +112,7 @@ app.put('/api/todos/:id', async (req, res) => {
             { new: true }
         );
         res.json(todo);
-    } catch (err) {
+    } catch(err) {
         res.status(500).json({ error: err.message });
     }
 });
@@ -109,47 +121,46 @@ app.delete('/api/todos/:id', async (req, res) => {
     try {
         await Todo.findByIdAndDelete(req.params.id);
         res.json({ message: 'deleted' });
-    } catch (err) {
+    } catch(err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// Simple HTML interface
+// Simple HTML
 app.get('/', (req, res) => {
     res.send(`
 <!DOCTYPE html>
 <html>
-<head>
-    <title>Todo App</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:system-ui;background:#f5f5f5;padding:20px}
-        .container{max-width:500px;margin:0 auto;background:white;border-radius:8px}
-        .header{background:#28a745;color:white;padding:20px}
-        .content{padding:20px}
-        .todo-form{display:flex;gap:10px;margin-bottom:20px}
-        .todo-form input{flex:1;padding:10px;border:1px solid #ddd;border-radius:4px}
-        .todo-form button{padding:10px 20px;background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer}
-        .todo-item{display:flex;align-items:center;gap:10px;padding:10px;background:#fafafa;border-radius:4px;margin-bottom:8px}
-        .todo-checkbox{width:18px;height:18px;cursor:pointer}
-        .todo-title{flex:1}
-        .completed .todo-title{text-decoration:line-through;color:#999}
-        .delete-btn{background:#dc3545;color:white;border:none;padding:4px 8px;border-radius:4px;cursor:pointer}
-        .empty-state{text-align:center;padding:40px;color:#999}
-        .stats{margin-top:20px;text-align:center;font-size:12px;color:#666}
-    </style>
+<head><title>Todo App</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui;background:#f5f5f5;padding:20px}
+.container{max-width:500px;margin:0 auto;background:white;border-radius:8px}
+.header{background:#28a745;color:white;padding:20px}
+.content{padding:20px}
+.todo-form{display:flex;gap:10px;margin-bottom:20px}
+.todo-form input{flex:1;padding:10px;border:1px solid #ddd;border-radius:4px}
+.todo-form button{padding:10px 20px;background:#28a745;color:white;border:none;border-radius:4px;cursor:pointer}
+.todo-item{display:flex;align-items:center;gap:10px;padding:10px;background:#fafafa;border-radius:4px;margin-bottom:8px}
+.todo-checkbox{width:18px;height:18px;cursor:pointer}
+.todo-title{flex:1}
+.completed .todo-title{text-decoration:line-through;color:#999}
+.delete-btn{background:#dc3545;color:white;border:none;padding:4px 8px;border-radius:4px;cursor:pointer}
+.empty-state{text-align:center;padding:40px;color:#999}
+.stats{margin-top:20px;text-align:center;font-size:12px;color:#666}
+</style>
 </head>
 <body>
 <div class="container">
-    <div class="header"><h1>Todo List</h1></div>
-    <div class="content">
-        <div class="todo-form">
-            <input type="text" id="title" placeholder="What needs to be done?" onkeypress="if(event.key==='Enter')addTodo()">
-            <button onclick="addTodo()">Add Task</button>
-        </div>
-        <div id="todos"></div>
-        <div class="stats" id="stats"></div>
-    </div>
+<div class="header"><h1>Todo List</h1></div>
+<div class="content">
+<div class="todo-form">
+<input type="text" id="title" placeholder="What needs to be done?" onkeypress="if(event.key==='Enter')addTodo()">
+<button onclick="addTodo()">Add Task</button>
+</div>
+<div id="todos"></div>
+<div class="stats" id="stats"></div>
+</div>
 </div>
 <script>
 async function loadTodos(){
@@ -180,8 +191,7 @@ loadTodos();setInterval(loadTodos,5000);
     `);
 });
 
-// Start server
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`📊 MongoDB URI: ${MONGODB_URI.replace(/:[^:@]*@/, ':****@')}`);
+    console.log(`✅ Todo app running on port ${PORT}`);
+    console.log(`📊 Database: ${MONGODB_URI.includes('mongodb+srv') ? 'MongoDB Atlas' : 'Local'}`);
 });
